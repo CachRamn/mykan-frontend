@@ -1,1 +1,58 @@
 @import "tailwindcss";
+
+/* ====================================================================
+   MyKan Veterinaria — estilos base del rediseño (paleta azul)
+   ==================================================================== */
+
+:root {
+  --mk-navy: #0A2A47;
+  --mk-blue: #1B6FD4;
+  --mk-blue-bright: #2E86F0;
+  --mk-coral: #F2683C;
+  --mk-bg: #F4F9FF;
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  color: #14283D;
+  background: var(--mk-bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* --- Animaciones decorativas --- */
+@keyframes mkfloat { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-13px); } }
+@keyframes mkpulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.65); } }
+@keyframes mkdrift { 0%, 100% { transform: translate(0, 0); } 50% { transform: translate(18px, -22px); } }
+@keyframes mkfade  { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+/* --- Revelado al hacer scroll (lo activa el componente <Reveal>) --- */
+.mk-reveal {
+  opacity: 0;
+  transform: translateY(22px);
+  transition: opacity .7s cubic-bezier(.22, .61, .36, 1), transform .7s cubic-bezier(.22, .61, .36, 1);
+}
+.mk-reveal.is-visible { opacity: 1; transform: none; }
+
+/* --- Hover de tarjetas (!important para ganar a los estilos inline) --- */
+.mk-card, .mk-card-coral { transition: transform .25s ease, box-shadow .25s ease, border-color .25s ease; }
+.mk-card:hover {
+  transform: translateY(-6px);
+  box-shadow: 0 20px 40px rgba(10, 42, 71, .10) !important;
+  border-color: #CFE2FB !important;
+}
+.mk-card-coral:hover {
+  transform: translateY(-6px);
+  box-shadow: 0 20px 40px rgba(242, 104, 60, .14) !important;
+  border-color: #F2B79E !important;
+}
+
+/* --- Hover de botones / enlaces --- */
+.mk-lift { transition: transform .2s ease, box-shadow .2s ease; }
+.mk-lift:hover { transform: translateY(-3px); }
+
+.mk-navlink:hover { color: #1B6FD4 !important; }
+.mk-footlink:hover { color: #ffffff !important; }
+.mk-social:hover { background: rgba(255, 255, 255, .16) !important; }
