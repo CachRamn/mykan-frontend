@@ -106,11 +106,11 @@ export default function Navbar() {
         {/* Botón móvil */}
         <button
           type="button"
-          className="md:hidden"
+          className="flex md:hidden"
           aria-label={open ? 'Cerrar menú' : 'Abrir menú'}
           aria-expanded={open}
           onClick={() => setOpen((v) => !v)}
-          style={{ display: 'flex', flexDirection: 'column', gap: 5, width: 44, height: 44, alignItems: 'center', justifyContent: 'center', background: '#F2F8FF', border: '1px solid #DBE6F2', borderRadius: 12, cursor: 'pointer' }}
+          style={{ flexDirection: 'column', gap: 5, width: 44, height: 44, alignItems: 'center', justifyContent: 'center', background: '#F2F8FF', border: '1px solid #DBE6F2', borderRadius: 12, cursor: 'pointer' }}
         >
           <span style={{ display: 'block', width: 20, height: 2, background: '#0A2A47', borderRadius: 2 }} />
           <span style={{ display: 'block', width: 20, height: 2, background: '#0A2A47', borderRadius: 2 }} />
