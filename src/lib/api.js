@@ -31,8 +31,14 @@ export async function login(username, password) {
   return data
 }
 
-export async function getAppointments() {
-  const res = await fetch(`${BASE_URL}/api/appointments`, {
+export async function getAppointments(from, to) {
+  const params = new URLSearchParams()
+  if (from) params.set('from', from)
+  if (to) params.set('to', to)
+  const query = params.toString()
+  const url = `${BASE_URL}/api/appointments${query ? `?${query}` : ''}`
+
+  const res = await fetch(url, {
     headers: authHeaders(),
   })
 
@@ -46,14 +52,29 @@ export async function getAppointments() {
   return res.json()
 }
 
-export async function confirmAppointment(id) {
+// Marca una cita como atendida (se conserva en el historial).
+export async function attendAppointment(id) {
+  const res = await fetch(`${BASE_URL}/api/appointments/${id}`, {
+    method: 'PATCH',
+    headers: authHeaders(),
+  })
+
+  if (!res.ok) {
+    throw new Error(`Error ${res.status}: no se pudo marcar la cita como atendida`)
+  }
+
+  return res.json()
+}
+
+// Elimina definitivamente una cita (para registros erróneos o spam).
+export async function deleteAppointment(id) {
   const res = await fetch(`${BASE_URL}/api/appointments/${id}`, {
     method: 'DELETE',
     headers: authHeaders(),
   })
 
   if (!res.ok) {
-    throw new Error(`Error ${res.status}: no se pudo confirmar la cita`)
+    throw new Error(`Error ${res.status}: no se pudo eliminar la cita`)
   }
 
   return res.json()

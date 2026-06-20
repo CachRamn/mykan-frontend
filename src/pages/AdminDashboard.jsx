@@ -1,56 +1,156 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { getAppointments, confirmAppointment, logout } from '../lib/api.js'
+import {
+  getAppointments,
+  attendAppointment,
+  deleteAppointment,
+  logout,
+} from '../lib/api.js'
 
 const POLL_INTERVAL_MS = 30_000
+const CDMX_OFFSET_H = 6 // CDMX = UTC-6 (sin horario de verano desde 2023)
+const DAY_MS = 24 * 60 * 60 * 1000
+const SLOT_MS = 30 * 60 * 1000 // duración de una cita
 
-function formatDate(iso) {
+// --- Helpers de zona horaria (todo en America/Mexico_City) -----------------
+
+// Instante (Date UTC) del lunes 00:00 CDMX de la semana que contiene `base`.
+function cdmxMonday(base) {
+  const shifted = new Date(base.getTime() - CDMX_OFFSET_H * 60 * 60 * 1000)
+  const dow = shifted.getUTCDay() // 0=Dom .. 6=Sáb, en horario CDMX
+  const diff = dow === 0 ? 6 : dow - 1 // días transcurridos desde el lunes
+  return new Date(
+    Date.UTC(
+      shifted.getUTCFullYear(),
+      shifted.getUTCMonth(),
+      shifted.getUTCDate() - diff,
+      CDMX_OFFSET_H, // medianoche CDMX = 06:00 UTC
+    ),
+  )
+}
+
+// Clave 'YYYY-MM-DD' del día CDMX al que pertenece una fecha.
+function cdmxDayKey(date) {
+  const s = new Date(date.getTime() - CDMX_OFFSET_H * 60 * 60 * 1000)
+  return `${s.getUTCFullYear()}-${String(s.getUTCMonth() + 1).padStart(2, '0')}-${String(
+    s.getUTCDate(),
+  ).padStart(2, '0')}`
+}
+
+const timeFmt = new Intl.DateTimeFormat('es-MX', {
+  timeZone: 'America/Mexico_City',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+})
+const colFmt = new Intl.DateTimeFormat('es-MX', {
+  timeZone: 'America/Mexico_City',
+  weekday: 'long',
+  day: 'numeric',
+})
+const rangeFmt = new Intl.DateTimeFormat('es-MX', {
+  timeZone: 'America/Mexico_City',
+  day: 'numeric',
+  month: 'short',
+  year: 'numeric',
+})
+
+function formatTime(iso) {
   try {
-    return new Intl.DateTimeFormat('es-MX', {
-      dateStyle: 'medium',
-      timeStyle: 'short',
-      timeZone: 'America/Mexico_City',
-    }).format(new Date(iso))
+    return timeFmt.format(new Date(iso))
   } catch {
-    return iso
+    return ''
   }
 }
 
 export default function AdminDashboard() {
   const navigate = useNavigate()
+  const [weekStart, setWeekStart] = useState(() => cdmxMonday(new Date()))
   const [appointments, setAppointments] = useState([])
   const [loading, setLoading] = useState(true)
   const [fetchError, setFetchError] = useState('')
-  const [confirming, setConfirming] = useState(null) // id en proceso
+  const [busyId, setBusyId] = useState(null) // id de cita en proceso
+  const [now, setNow] = useState(0) // referencia temporal para marcar citas vencidas
 
-  const fetchAppointments = useCallback(async () => {
+  // Seis días de la semana visible: lunes a sábado (domingo cerrado).
+  const days = useMemo(
+    () =>
+      Array.from({ length: 6 }, (_, i) => {
+        const instant = new Date(weekStart.getTime() + i * DAY_MS)
+        return { instant, key: cdmxDayKey(instant) }
+      }),
+    [weekStart],
+  )
+
+  const todayKey = cdmxDayKey(new Date())
+
+  // Citas agrupadas por día CDMX (el backend ya las devuelve ordenadas por hora).
+  const byDay = useMemo(() => {
+    const map = {}
+    for (const apt of appointments) {
+      const key = cdmxDayKey(new Date(apt.appointment_date))
+      ;(map[key] ||= []).push(apt)
+    }
+    return map
+  }, [appointments])
+
+  const fetchWeek = useCallback(async () => {
+    const from = weekStart.toISOString()
+    const to = new Date(weekStart.getTime() + 6 * DAY_MS).toISOString() // [lun, dom)
     try {
-      const data = await getAppointments()
+      const data = await getAppointments(from, to)
       setAppointments(data)
+      setNow(Date.now())
       setFetchError('')
-    } catch (err) {
+    } catch {
       setFetchError('No se pudo cargar la lista de citas. Reintentando…')
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [weekStart])
 
   useEffect(() => {
-    fetchAppointments()
-    const interval = setInterval(fetchAppointments, POLL_INTERVAL_MS)
+    fetchWeek()
+    const interval = setInterval(fetchWeek, POLL_INTERVAL_MS)
     return () => clearInterval(interval)
-  }, [fetchAppointments])
+  }, [fetchWeek])
 
-  async function handleConfirm(id) {
-    setConfirming(id)
+  // Cambio de semana desde un evento (no desde el effect): mostramos el spinner
+  // y limpiamos la lista anterior antes de recargar.
+  function changeWeek(compute) {
+    setLoading(true)
+    setAppointments([])
+    setWeekStart(compute)
+  }
+
+  async function handleAttend(id) {
+    setBusyId(id)
     try {
-      await confirmAppointment(id)
+      await attendAppointment(id)
+      setAppointments((prev) =>
+        prev.map((a) =>
+          a.id === id ? { ...a, status: 'attended', attended_at: new Date().toISOString() } : a,
+        ),
+      )
+    } catch {
+      alert('No se pudo marcar la cita como atendida. Intenta de nuevo.')
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function handleDelete(id) {
+    if (!window.confirm('¿Eliminar esta cita de forma permanente? Esta acción no se puede deshacer.')) {
+      return
+    }
+    setBusyId(id)
+    try {
+      await deleteAppointment(id)
       setAppointments((prev) => prev.filter((a) => a.id !== id))
     } catch {
-      // Mensaje silencioso; el usuario puede reintentar
-      alert('No se pudo confirmar la cita. Intenta de nuevo.')
+      alert('No se pudo eliminar la cita. Intenta de nuevo.')
     } finally {
-      setConfirming(null)
+      setBusyId(null)
     }
   }
 
@@ -58,6 +158,9 @@ export default function AdminDashboard() {
     await logout()
     navigate('/login', { replace: true })
   }
+
+  const weekRange = `${rangeFmt.format(days[0].instant)} – ${rangeFmt.format(days[5].instant)}`
+  const totalWeek = appointments.length
 
   return (
     <div className="bg-gray-50 min-h-screen">
@@ -77,17 +180,50 @@ export default function AdminDashboard() {
         </button>
       </header>
 
-      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-8">
-        <div className="flex items-center justify-between mb-6 gap-4 flex-wrap">
-          <h2 className="text-xl font-bold text-gray-800">Citas pendientes</h2>
-          <button
-            type="button"
-            onClick={fetchAppointments}
-            className="text-sm text-[#1a6b3a] font-medium hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1a6b3a] rounded"
-            aria-label="Recargar lista de citas"
-          >
-            Actualizar
-          </button>
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 py-8">
+        {/* Navegación de semana */}
+        <div className="flex items-center justify-between gap-4 flex-wrap mb-6">
+          <div>
+            <h2 className="text-xl font-bold text-gray-800">Agenda semanal</h2>
+            <p className="text-sm text-gray-500 capitalize">
+              {weekRange}
+              <span className="text-gray-400 normal-case"> · {totalWeek} cita(s)</span>
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => changeWeek((w) => new Date(w.getTime() - 7 * DAY_MS))}
+              className="text-sm font-medium bg-white border border-gray-200 text-gray-700 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1a6b3a]"
+              aria-label="Semana anterior"
+            >
+              ‹ Anterior
+            </button>
+            <button
+              type="button"
+              onClick={() => changeWeek(() => cdmxMonday(new Date()))}
+              className="text-sm font-semibold bg-[#1a6b3a] text-white px-3 py-2 rounded-lg hover:bg-[#2d8653] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1a6b3a]"
+              aria-label="Ir a la semana actual"
+            >
+              Hoy
+            </button>
+            <button
+              type="button"
+              onClick={() => changeWeek((w) => new Date(w.getTime() + 7 * DAY_MS))}
+              className="text-sm font-medium bg-white border border-gray-200 text-gray-700 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1a6b3a]"
+              aria-label="Semana siguiente"
+            >
+              Siguiente ›
+            </button>
+            <button
+              type="button"
+              onClick={fetchWeek}
+              className="text-sm text-[#1a6b3a] font-medium hover:underline px-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1a6b3a] rounded"
+              aria-label="Recargar lista de citas"
+            >
+              Actualizar
+            </button>
+          </div>
         </div>
 
         {/* Error */}
@@ -108,177 +244,167 @@ export default function AdminDashboard() {
             aria-live="polite"
             aria-label="Cargando citas…"
           >
-            <svg
-              aria-hidden="true"
-              className="animate-spin h-6 w-6 text-[#1a6b3a]"
-              fill="none"
-              viewBox="0 0 24 24"
-            >
-              <circle
-                className="opacity-25"
-                cx="12"
-                cy="12"
-                r="10"
-                stroke="currentColor"
-                strokeWidth="4"
-              />
-              <path
-                className="opacity-75"
-                fill="currentColor"
-                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-              />
+            <svg aria-hidden="true" className="animate-spin h-6 w-6 text-[#1a6b3a]" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
             </svg>
             <span>Cargando citas…</span>
           </div>
         )}
 
-        {/* Sin citas */}
-        {!loading && !fetchError && appointments.length === 0 && (
-          <div
-            className="text-center py-20 text-gray-400"
-            aria-live="polite"
-          >
-            <p className="text-5xl mb-4" aria-hidden="true">📋</p>
-            <p className="text-lg font-medium">No hay citas pendientes</p>
-            <p className="text-sm mt-1">Las nuevas citas del bot aparecerán aquí automáticamente.</p>
-          </div>
-        )}
-
-        {/* Tabla de citas — desktop */}
-        {!loading && appointments.length > 0 && (
+        {/* Grilla semanal — escritorio (Lun–Sáb) */}
+        {!loading && (
           <>
-            {/* Vista escritorio */}
-            <div className="hidden sm:block overflow-x-auto rounded-xl shadow-md">
-              <table
-                className="w-full bg-white text-sm"
-                aria-label="Lista de citas pendientes"
-              >
-                <thead className="bg-gray-50 border-b border-gray-200">
-                  <tr>
-                    {['Dueño', 'Mascota', 'Teléfono', 'Servicio', 'Fecha y Hora', 'Acción'].map(
-                      (col) => (
-                        <th
-                          key={col}
-                          scope="col"
-                          className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wide px-5 py-3"
-                        >
-                          {col}
-                        </th>
-                      ),
-                    )}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {appointments.map((apt) => (
-                    <tr key={apt.id} className="hover:bg-gray-50 transition-colors">
-                      <td className="px-5 py-4 text-gray-800 font-medium">{apt.owner_name}</td>
-                      <td className="px-5 py-4 text-gray-600">{apt.pet_name}</td>
-                      <td className="px-5 py-4 text-gray-600">
-                        <a
-                          href={`tel:${apt.phone}`}
-                          className="hover:text-[#1a6b3a] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1a6b3a] rounded"
-                        >
-                          {apt.phone}
-                        </a>
-                      </td>
-                      <td className="px-5 py-4 text-gray-600">{apt.service}</td>
-                      <td className="px-5 py-4 text-gray-600 whitespace-nowrap">
-                        {formatDate(apt.appointment_date)}
-                      </td>
-                      <td className="px-5 py-4">
-                        <button
-                          type="button"
-                          onClick={() => handleConfirm(apt.id)}
-                          disabled={confirming === apt.id}
-                          aria-label={`Confirmar cita de ${apt.owner_name}`}
-                          className="inline-flex items-center gap-1.5 bg-[#1a6b3a] text-white text-xs font-semibold px-3 py-1.5 rounded-lg hover:bg-[#2d8653] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1a6b3a] focus-visible:ring-offset-1 disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          {confirming === apt.id ? (
-                            <>
-                              <svg
-                                aria-hidden="true"
-                                className="animate-spin h-3 w-3"
-                                fill="none"
-                                viewBox="0 0 24 24"
-                              >
-                                <circle
-                                  className="opacity-25"
-                                  cx="12"
-                                  cy="12"
-                                  r="10"
-                                  stroke="currentColor"
-                                  strokeWidth="4"
-                                />
-                                <path
-                                  className="opacity-75"
-                                  fill="currentColor"
-                                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-                                />
-                              </svg>
-                              Confirmando…
-                            </>
-                          ) : (
-                            <>✓ Confirmar</>
-                          )}
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="hidden md:grid md:grid-cols-6 gap-3">
+              {days.map((day) => {
+                const isToday = day.key === todayKey
+                const list = byDay[day.key] || []
+                return (
+                  <section
+                    key={day.key}
+                    className={`rounded-xl border ${
+                      isToday ? 'border-[#1a6b3a] ring-1 ring-[#1a6b3a]/30' : 'border-gray-200'
+                    } bg-white flex flex-col min-h-[120px]`}
+                    aria-label={colFmt.format(day.instant)}
+                  >
+                    <header
+                      className={`px-3 py-2 rounded-t-xl border-b text-center ${
+                        isToday ? 'bg-[#1a6b3a] text-white border-[#1a6b3a]' : 'bg-gray-50 border-gray-100'
+                      }`}
+                    >
+                      <p className="text-xs font-semibold capitalize leading-tight">
+                        {colFmt.format(day.instant)}
+                      </p>
+                      <p className={`text-[11px] ${isToday ? 'text-green-100' : 'text-gray-400'}`}>
+                        {list.length} cita(s)
+                      </p>
+                    </header>
+                    <div className="p-2 flex flex-col gap-2">
+                      {list.length === 0 ? (
+                        <p className="text-[11px] text-gray-300 text-center py-3">Sin citas</p>
+                      ) : (
+                        list.map((apt) => (
+                          <AppointmentCard
+                            key={apt.id}
+                            apt={apt}
+                            now={now}
+                            busy={busyId === apt.id}
+                            onAttend={handleAttend}
+                            onDelete={handleDelete}
+                          />
+                        ))
+                      )}
+                    </div>
+                  </section>
+                )
+              })}
             </div>
 
-            {/* Vista móvil — tarjetas */}
-            <ul className="sm:hidden flex flex-col gap-4" role="list">
-              {appointments.map((apt) => (
-                <li
-                  key={apt.id}
-                  className="bg-white rounded-xl shadow-md p-4 flex flex-col gap-2"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <p className="font-semibold text-gray-800">{apt.owner_name}</p>
-                      <p className="text-sm text-gray-500">Mascota: {apt.pet_name}</p>
-                    </div>
-                    <span className="text-xs bg-green-100 text-green-800 font-medium px-2 py-0.5 rounded-full whitespace-nowrap">
-                      Pendiente
-                    </span>
-                  </div>
-                  <p className="text-sm text-gray-600">
-                    <span className="font-medium">Servicio:</span> {apt.service}
-                  </p>
-                  <p className="text-sm text-gray-600">
-                    <span className="font-medium">Fecha:</span>{' '}
-                    {formatDate(apt.appointment_date)}
-                  </p>
-                  <p className="text-sm text-gray-600">
-                    <span className="font-medium">Tel:</span>{' '}
-                    <a
-                      href={`tel:${apt.phone}`}
-                      className="text-[#1a6b3a] hover:underline"
+            {/* Móvil — secciones apiladas por día */}
+            <div className="md:hidden flex flex-col gap-4">
+              {days.map((day) => {
+                const isToday = day.key === todayKey
+                const list = byDay[day.key] || []
+                return (
+                  <section key={day.key} className="rounded-xl border border-gray-200 bg-white overflow-hidden">
+                    <header
+                      className={`px-4 py-2 flex items-center justify-between ${
+                        isToday ? 'bg-[#1a6b3a] text-white' : 'bg-gray-50'
+                      }`}
                     >
-                      {apt.phone}
-                    </a>
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => handleConfirm(apt.id)}
-                    disabled={confirming === apt.id}
-                    aria-label={`Confirmar cita de ${apt.owner_name}`}
-                    className="mt-2 w-full bg-[#1a6b3a] text-white text-sm font-semibold py-2 rounded-lg hover:bg-[#2d8653] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1a6b3a] focus-visible:ring-offset-1 disabled:opacity-50"
-                  >
-                    {confirming === apt.id ? 'Confirmando…' : '✓ Confirmar cita'}
-                  </button>
-                </li>
-              ))}
-            </ul>
+                      <span className="text-sm font-semibold capitalize">{colFmt.format(day.instant)}</span>
+                      <span className={`text-xs ${isToday ? 'text-green-100' : 'text-gray-400'}`}>
+                        {list.length} cita(s)
+                      </span>
+                    </header>
+                    <div className="p-3 flex flex-col gap-2">
+                      {list.length === 0 ? (
+                        <p className="text-xs text-gray-300 text-center py-2">Sin citas</p>
+                      ) : (
+                        list.map((apt) => (
+                          <AppointmentCard
+                            key={apt.id}
+                            apt={apt}
+                            now={now}
+                            busy={busyId === apt.id}
+                            onAttend={handleAttend}
+                            onDelete={handleDelete}
+                          />
+                        ))
+                      )}
+                    </div>
+                  </section>
+                )
+              })}
+            </div>
           </>
         )}
 
         <p className="text-xs text-gray-400 mt-8 text-center">
-          La lista se actualiza automáticamente cada 30 segundos.
+          La agenda se actualiza automáticamente cada 30 segundos. Horario CDMX.
         </p>
       </main>
     </div>
+  )
+}
+
+// --- Tarjeta de cita --------------------------------------------------------
+
+function AppointmentCard({ apt, now, busy, onAttend, onDelete }) {
+  const attended = apt.status === 'attended'
+  const past = Date.parse(apt.appointment_date) + SLOT_MS < now
+  // Tono: atendida (verde), pendiente vencida (ámbar), pendiente futura (normal).
+  const tone = attended
+    ? 'bg-green-50 border-green-200'
+    : past
+      ? 'bg-amber-50 border-amber-200'
+      : 'bg-white border-gray-200'
+
+  return (
+    <article className={`rounded-lg border ${tone} p-2.5 text-xs flex flex-col gap-1`}>
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-bold text-gray-800">{formatTime(apt.appointment_date)}</span>
+        {attended ? (
+          <span className="text-[10px] font-semibold text-green-700 bg-green-100 px-1.5 py-0.5 rounded-full whitespace-nowrap">
+            ✓ Atendida
+          </span>
+        ) : past ? (
+          <span className="text-[10px] font-semibold text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded-full whitespace-nowrap">
+            No atendida
+          </span>
+        ) : null}
+      </div>
+
+      <p className="font-medium text-gray-800 leading-tight">{apt.owner_name}</p>
+      <p className="text-gray-500 leading-tight">
+        🐾 {apt.pet_name} · {apt.service}
+      </p>
+      <a href={`tel:${apt.phone}`} className="text-[#1a6b3a] hover:underline leading-tight">
+        📞 {apt.phone}
+      </a>
+
+      <div className="flex items-center gap-1.5 mt-1">
+        {!attended && (
+          <button
+            type="button"
+            onClick={() => onAttend(apt.id)}
+            disabled={busy}
+            aria-label={`Marcar como atendida la cita de ${apt.owner_name}`}
+            className="flex-1 bg-[#1a6b3a] text-white text-[11px] font-semibold px-2 py-1 rounded-md hover:bg-[#2d8653] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1a6b3a] disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {busy ? '…' : '✓ Atender'}
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => onDelete(apt.id)}
+          disabled={busy}
+          aria-label={`Eliminar la cita de ${apt.owner_name}`}
+          className="text-[11px] font-medium text-red-600 px-2 py-1 rounded-md hover:bg-red-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          Eliminar
+        </button>
+      </div>
+    </article>
   )
 }
